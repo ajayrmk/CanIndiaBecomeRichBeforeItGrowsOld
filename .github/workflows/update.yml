@@ -1,0 +1,119 @@
+name: Update Answer
+on:
+  schedule:
+    - cron:  '0 0 * * *'    # Runs daily at 00:00 UTC
+  workflow_dispatch:        # Allows manual trigger from the Actions tab
+
+# Sets permissions of the GITHUB_TOKEN
+permissions:
+  contents: write      # Required for pushing changes
+  pages: write        # Required for deploying to Pages
+  id-token: write     # Required for Pages deployment
+
+# Allow only one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+# Configure settings
+env:
+  # Set to 'true' to run the review agent
+  RUN_REVIEW: "true"
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests python-dotenv markdown2
+
+      - name: Configure Git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Get last verification date
+        id: get_date
+        run: |
+          if [ -f "last_verification.txt" ]; then
+            echo "LAST_VERIFIER_RUN=$(cat last_verification.txt)" >> $GITHUB_ENV
+            echo "Using last verification date: $(cat last_verification.txt)"
+          else
+            # If file doesn't exist, set a date from 31 days ago to trigger verification
+            LAST_DATE=$(date -d "31 days ago" -u '+%Y-%m-%dT%H:%M:%S')
+            echo "LAST_VERIFIER_RUN=$LAST_DATE" >> $GITHUB_ENV
+            echo "No previous verification date found, setting: $LAST_DATE"
+          fi
+
+      - name: Run update script
+        env:
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+        run: |
+          if [ "${{ env.RUN_REVIEW }}" = "true" ]; then
+            python update_answer.py --review
+          else
+            python update_answer.py
+          fi
+
+      - name: Update verification date if verifier ran
+        if: success()
+        run: |
+          # Check if the verifier was run by looking at the log
+          if grep -q "Verifier Agent completed successfully" update.log; then
+            echo "Verifier was run, updating last verification date"
+            # Get today's date in ISO format
+            TODAY=$(date -u '+%Y-%m-%dT%H:%M:%S')
+            
+            # Write date to file
+            echo "$TODAY" > last_verification.txt
+            echo "Updated last verification date to $TODAY"
+            
+            # Stage the date file
+            git add last_verification.txt
+          else
+            echo "Verifier was not run, no need to update verification date"
+          fi
+
+      - name: Commit and push changes
+        run: |
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "Changes detected, committing and pushing"
+            
+            # Add index.html if changed
+            if [[ -n $(git status --porcelain index.html) ]]; then
+              git add index.html
+            fi
+            
+            # Commit all staged changes
+            git commit -m "Automated update: $(date -u '+%B %d, %Y')"
+            git push
+          else
+            echo "No changes to commit"
+          fi
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4 
